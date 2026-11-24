@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel de señales · cuenta demo</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --txt:#e8eaed; --mut:#8a93a0; --up:#22c55e; --down:#f43f5e; --acc:#ffd400; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:16px 24px; border-bottom:1px solid #262c35; }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; color:var(--mut); font-size:13px; }
+  main { display:grid; grid-template-columns: 1fr 420px; gap:16px; padding:16px 24px; }
+  @media (max-width:1000px){ main { grid-template-columns:1fr; } }
+  .card { background:var(--card); border-radius:12px; padding:16px; }
+  h2 { font-size:15px; margin:0 0 10px; color:var(--mut); font-weight:600; }
+  button { background:#2d6cdf; color:#fff; border:0; border-radius:8px; padding:10px 14px; font-size:14px; cursor:pointer; }
+  button:disabled { background:#3a414c; color:#7b8390; cursor:default; }
+  .row { display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin-top:12px; font-size:13px; }
+  input[type=number] { width:64px; background:#0f1215; color:var(--txt); border:1px solid #333a45; border-radius:6px; padding:4px 6px; }
+  #preview { width:100%; margin-top:12px; border-radius:8px; background:#000; cursor:crosshair; display:block; }
+  .hint { color:var(--mut); font-size:13px; margin:10px 0 0; }
+  #signal { font-size:56px; font-weight:800; text-align:center; padding:28px 0; border-radius:12px; background:#232933; transition:background .15s; }
+  #signal.up { background:var(--up); color:#06210f; }
+  #signal.down { background:var(--down); color:#2a0610; }
+  #sub { text-align:center; color:var(--mut); margin:10px 0 4px; min-height:20px; }
+  #price { text-align:center; font-variant-numeric:tabular-nums; }
+  .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:14px; }
+  .stat { background:#232933; border-radius:8px; padding:10px; }
+  .stat b { display:block; font-size:20px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--mut); font-size:12px; }
+  #verdict { margin-top:10px; font-size:13px; color:var(--mut); }
+  #chart { width:100%; height:180px; margin-top:12px; background:#151a20; border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin-top:12px; font-variant-numeric:tabular-nums; }
+  th, td { padding:4px 6px; text-align:left; border-bottom:1px solid #262c35; }
+  .ok { color:var(--up); } .ko { color:var(--down); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Panel de señales · cuenta demo</h1>
+  <p>Proyecto estudiantil. Este panel no opera: lee el precio, sugiere ARRIBA/ABAJO y evalúa si la sugerencia acertó. El clic lo das tú.</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Configuración</h2>
+    <button id="btnShare">1. Compartir la pestaña de la plataforma</button>
+    <p class="hint">2. Arrastra un rectángulo ajustado sobre la <b>columna de precios</b> (a la derecha del gráfico), de arriba a abajo, de modo que la etiqueta blanca del precio actual ocupe casi todo el ancho.</p>
+    <canvas id="preview" width="900" height="400"></canvas>
+    <div class="row">
+      <label>Umbral de confianza <input type="range" id="umbral" min="0.3" max="0.9" step="0.05" value="0.6"> <span id="umbralVal">0.60</span></label>
+      <label>Duración (s) <input type="number" id="dur" value="5" min="1" max="60"></label>
+      <label>Pago (%) <input type="number" id="pago" value="85" min="1" max="100"></label>
+    </div>
+    <div class="row">
+      <button id="btnStart" disabled>3. Iniciar</button>
+      <button id="btnStop" disabled>Detener</button>
+      <button id="btnCsv" disabled>Descargar CSV</button>
+      <span id="status" class="hint" style="margin:0"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Señal</h2>
+    <div id="signal">—</div>
+    <div id="sub">Configura y pulsa Iniciar</div>
+    <div id="price">Precio: —</div>
+
+    <div class="stats">
+      <div class="stat"><b id="sN">0</b><span>Señales evaluadas</span></div>
+      <div class="stat"><b id="sRate">—</b><span>Tasa de acierto</span></div>
+      <div class="stat"><b id="sBE">54.05%</b><span>Necesario para no perder</span></div>
+      <div class="stat"><b id="sPnl">0.00</b><span>Resultado simulado (en apuestas)</span></div>
+    </div>
+    <div id="verdict"></div>
+    <canvas id="chart" width="800" height="240"></canvas>
+
+    <table>
+      <thead><tr><th>Hora</th><th>Señal</th><th>Conf.</th><th>Entrada</th><th>Salida</th><th>Res.</th></tr></thead>
+      <tbody id="log"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let video = null, region = null, running = false, worker = null, actx = null;
+let prices = [], openOps = [], results = [], rows = [], lastSignal = 0;
+let DUR = 5, PAGO = 0.85, UMBRAL = 0.6;
+
+$('umbral').oninput = e => { $('umbralVal').textContent = (+e.target.value).toFixed(2); UMBRAL = +e.target.value; };
+
+// ---------- 1. Compartir pantalla ----------
+$('btnShare').onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 10 }, audio: false });
+    video = document.createElement('video');
+    video.srcObject = stream; video.muted = true;
+    await video.play();
+    stream.getVideoTracks()[0].onended = stopRun;
+    requestAnimationFrame(drawPreview);
+    $('status').textContent = 'Pantalla compartida. Ahora marca la columna de precios.';
+  } catch (e) { $('status').textContent = 'No se pudo compartir la pantalla: ' + e.message; }
+};
+
+function drawPreview() {
+  if (!video) return;
+  const c = $('preview');
+  if (c.width !== video.videoWidth) { c.width = video.videoWidth; c.height = video.videoHeight; }
+  const ctx = c.getContext('2d');
+  ctx.drawImage(video, 0, 0);
+  const r = dragRect || region;
+  if (r) { ctx.strokeStyle = '#ffd400'; ctx.lineWidth = 3; ctx.strokeRect(r.x, r.y, r.w, r.h); }
+  requestAnimationFrame(drawPreview);
+}
+
+// ---------- 2. Seleccionar región ----------
+let dragStart = null, dragRect = null;
+function toCanvas(e) {
+  const c = $('preview'), b = c.getBoundingClientRect();
+  return { x: (e.clientX - b.left) * c.width / b.width, y: (e.clientY - b.top) * c.height / b.height };
+}
+$('preview').onmousedown = e => { if (!video) return; dragStart = toCanvas(e); };
+window.onmousemove = e => {
+  if (!dragStart) return;
+  const p = toCanvas(e);
+  dragRect = { x: Math.round(Math.min(p.x, dragStart.x)), y: Math.round(Math.min(p.y, dragStart.y)),
+               w: Math.round(Math.abs(p.x - dragStart.x)), h: Math.round(Math.abs(p.y - dragStart.y)) };
+};
+window.onmouseup = () => {
+  if (!dragStart) return;
+  dragStart = null;
+  if (dragRect && dragRect.w > 10 && dragRect.h > 40) {
+    region = dragRect;
+    $('btnStart').disabled = false;
+    $('status').textContent = 'Región lista. Pulsa Iniciar.';
+  }
+  dragRect = null;
+};
+
+// ---------- Lectura del precio (OCR) ----------
+const work = document.createElement('canvas'), crop = document.createElement('canvas');
+async function readPrice() {
+  const { x, y, w, h } = region;
+  work.width = w; work.height = h;
+  const wc = work.getContext('2d', { willReadFrequently: true });
+  wc.drawImage(video, x, y, w, h, 0, 0, w, h);
+  const d = wc.getImageData(0, 0, w, h).data;
+
+  // Filas "claras" = la etiqueta blanca del precio actual
+  const bright = [];
+  for (let j = 0; j < h; j++) {
+    let n = 0;
+    for (let i = 0; i < w; i++) { const k = (j * w + i) * 4; if ((d[k] + d[k + 1] + d[k + 2]) / 3 > 200) n++; }
+    if (n / w > 0.4) bright.push(j);
+  }
+  if (bright.length < 5) return null;
+  let best = [bright[0], bright[0]], cur = [bright[0], bright[0]];
+  for (let i = 1; i < bright.length; i++) {
+    if (bright[i] === bright[i - 1] + 1) cur[1] = bright[i]; else cur = [bright[i], bright[i]];
+    if (cur[1] - cur[0] > best[1] - best[0]) best = [...cur];
+  }
+  const y0 = Math.max(0, best[0] - 2), y1 = Math.min(h, best[1] + 3), S = 3;
+  crop.width = w * S; crop.height = (y1 - y0) * S;
+  const cc = crop.getContext('2d');
+  cc.filter = 'grayscale(1)';
+  cc.drawImage(work, 0, y0, w, y1 - y0, 0, 0, crop.width, crop.height);
+  const { data: { text } } = await worker.recognize(crop);
+  const m = text.replace(',', '.').match(/\d+\.\d+/);
+  return m ? parseFloat(m[0]) : null;
+}
+
+// ---------- Indicadores ----------
+function ema(x, n) { const a = 2 / (n + 1); let e = x[0]; for (let i = 1; i < x.length; i++) e = a * x[i] + (1 - a) * e; return e; }
+function std(a) { const m = a.reduce((s, v) => s + v, 0) / a.length; return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length); }
+function rsi(x, n = 14) {
+  let up = 0, dn = 0;
+  for (let i = x.length - n; i < x.length; i++) { const df = x[i] - x[i - 1]; if (df > 0) up += df; else dn -= df; }
+  return up + dn === 0 ? 50 : 100 * up / (up + dn);
+}
+function computeSignal() {
+  if (prices.length < 60) return { dir: 0, conf: 0, warm: true };
+  const x = prices.slice(-60).map(o => o.p);
+  const diffs = x.slice(1).map((v, i) => v - x[i]);
+  const vol = std(diffs) || 1e-9;
+  const tend = (ema(x, 8) - ema(x, 30)) / (vol * 5);        // tendencia
+  const mom = (x[x.length - 1] - x[x.length - 9]) / (vol * 3); // impulso reciente
+  const r = rsi(x);
+  const rev = (r > 70 || r < 30) ? -(r - 50) / 50 : 0;        // reversión por RSI extremo
+  const score = 0.45 * Math.tanh(tend) + 0.35 * Math.tanh(mom) + 0.20 * rev;
+  const conf = Math.abs(score);
+  return { dir: conf < UMBRAL ? 0 : Math.sign(score), conf };
+}
+
+// ---------- Sonido ----------
+function beep(freq) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.frequency.value = freq; o.connect(g); g.connect(actx.destination);
+  g.gain.setValueAtTime(0.25, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.35);
+  o.start(); o.stop(actx.currentTime + 0.35);
+}
+
+// ---------- Estadística ----------
+function normCdf(z) { // Abramowitz-Stegun
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const p = 0.3989423 * Math.exp(-z * z / 2) * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return z > 0 ? 1 - p : p;
+}
+function updateStats() {
+  const n = results.length, g = results.reduce((s, v) => s + v, 0), be = 1 / (1 + PAGO);
+  $('sN').textContent = n;
+  $('sBE').textContent = (be * 100).toFixed(2) + '%';
+  $('sRate').textContent = n ? (g / n * 100).toFixed(2) + '%' : '—';
+  const pnl = g * PAGO - (n - g);
+  $('sPnl').textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+  $('sPnl').className = pnl >= 0 ? 'ok' : 'ko';
+  if (n) {
+    const z = (g / n - be) / Math.sqrt(be * (1 - be) / n), p = 1 - normCdf(z);
+    let v = `p-valor (¿supera el ${(be * 100).toFixed(2)}%?): ${p.toFixed(4)}. `;
+    if (n < 300) v += 'Muestra pequeña: deja correr más para poder concluir.';
+    else if (p < 0.05) v += 'La estrategia supera el punto de equilibrio con significancia estadística.';
+    else v += 'No hay evidencia de ventaja: con esta estrategia se pierde a la larga.';
+    $('verdict').textContent = v;
+  }
+  drawChart(be);
+}
+function drawChart(be) {
+  const c = $('chart'), ctx = c.getContext('2d'), W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  const yOf = v => H - 20 - (v - 0.2) / 0.6 * (H - 40); // eje 20%..80%
+  ctx.fillStyle = '#8a93a0'; ctx.font = '20px system-ui';
+  [0.3, 0.5, 0.7].forEach(v => { ctx.fillText((v * 100) + '%', 6, yOf(v) + 6); });
+  ctx.setLineDash([8, 6]); ctx.strokeStyle = '#ffd400'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(60, yOf(be)); ctx.lineTo(W - 10, yOf(be)); ctx.stroke(); ctx.setLineDash([]);
+  if (results.length < 2) return;
+  ctx.strokeStyle = '#60a5fa'; ctx.lineWidth = 3; ctx.beginPath();
+  let g = 0;
+  results.forEach((r, i) => {
+    g += r;
+    const x = 60 + i / (results.length - 1) * (W - 70), y = yOf(Math.max(0.2, Math.min(0.8, g / (i + 1))));
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+}
+function addRow(r) {
+  rows.push(r);
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${r.hora}</td><td>${r.senal}</td><td>${r.conf}</td><td>${r.entrada}</td><td>${r.salida}</td>
+                  <td class="${r.acierto ? 'ok' : 'ko'}">${r.acierto ? 'Acierto' : 'Fallo'}</td>`;
+  const tb = $('log'); tb.prepend(tr);
+  while (tb.children.length > 12) tb.lastChild.remove();
+  $('btnCsv').disabled = false;
+}
+
+// ---------- Bucle principal ----------
+function closeExpired(now) {
+  if (!prices.length) return;
+  const salida = prices[prices.length - 1].p;
+  openOps.filter(o => now >= o.cierre).forEach(o => {
+    const acierto = (salida - o.entrada) * o.dir > 0 ? 1 : 0;
+    results.push(acierto);
+    addRow({ hora: o.hora, senal: o.dir > 0 ? 'ARRIBA' : 'ABAJO', conf: o.conf.toFixed(2),
+             entrada: o.entrada, salida, acierto });
+    $('sub').textContent = `Última: ${acierto ? 'ACIERTO' : 'FALLO'} (${o.entrada} → ${salida})`;
+    beep(acierto ? 1100 : 220);
+    updateStats();
+  });
+  openOps = openOps.filter(o => now < o.cierre);
+}
+function render(now, sig) {
+  const box = $('signal');
+  const op = openOps[openOps.length - 1];
+  if (op) {
+    box.className = op.dir > 0 ? 'up' : 'down';
+    box.textContent = (op.dir > 0 ? 'ARRIBA ↑' : 'ABAJO ↓') + '  ' + Math.ceil((op.cierre - now) / 1000) + 's';
+  } else {
+    box.className = ''; box.textContent = '—';
+    if (sig.warm) $('sub').textContent = `Calentando: ${prices.length}/60 lecturas…`;
+  }
+}
+async function loop() {
+  if (!running) return;
+  const t0 = performance.now();
+  try {
+    const p = await readPrice(), now = Date.now();
+    if (p !== null) {
+      const last = prices.length ? prices[prices.length - 1].p : null;
+      if (last === null || Math.abs(p - last) / last < 0.002) { // descarta errores de OCR
+        prices.push({ t: now, p }); if (prices.length > 400) prices.shift();
+        $('price').textContent = 'Precio: ' + p.toFixed(4);
+      }
+    }
+    closeExpired(now);
+    const sig = computeSignal();
+    if (sig.dir && openOps.length === 0 && now - lastSignal >= DUR * 1000) {
+      const entrada = prices[prices.length - 1].p;
+      openOps.push({ dir: sig.dir, conf: sig.conf, entrada, cierre: now + DUR * 1000,
+                     hora: new Date(now).toLocaleTimeString('es-CO') });
+      lastSignal = now;
+      beep(sig.dir > 0 ? 880 : 440);
+    }
+    render(now, sig);
+  } catch (e) { console.error(e); }
+  setTimeout(loop, Math.max(0, 250 - (performance.now() - t0)));
+}
+
+$('btnStart').onclick = async () => {
+  DUR = +$('dur').value || 5; PAGO = (+$('pago').value || 85) / 100; UMBRAL = +$('umbral').value;
+  actx = actx || new AudioContext();
+  $('btnStart').disabled = true; $('btnShare').disabled = true;
+  $('status').textContent = 'Cargando OCR…';
+  if (!worker) {
+    worker = await Tesseract.createWorker('eng');
+    await worker.setParameters({ tessedit_char_whitelist: '0123456789.', tessedit_pageseg_mode: '7' });
+  }
+  $('status').textContent = 'En marcha.';
+  $('btnStop').disabled = false;
+  running = true; updateStats(); loop();
+};
+function stopRun() {
+  running = false;
+  $('btnStop').disabled = true; $('btnStart').disabled = !region; $('btnShare').disabled = false;
+  $('status').textContent = 'Detenido.';
+}
+$('btnStop').onclick = stopRun;
+
+$('btnCsv').onclick = () => {
+  const head = 'hora,senal,confianza,precio_entrada,precio_salida,acierto\n';
+  const body = rows.map(r => [r.hora, r.senal, r.conf, r.entrada, r.salida, r.acierto].join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([head + body], { type: 'text/csv' }));
+  a.download = 'senales.csv'; a.click();
+};
+</script>
+</body>
+</html>
