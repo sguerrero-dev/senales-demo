@@ -81,6 +81,13 @@
     <div id="verdict"></div>
     <canvas id="chart" width="800" height="240"></canvas>
 
+    <h2 style="margin-top:16px">Comparación de estrategias (en paralelo)</h2>
+    <table>
+      <thead><tr><th>Estrategia</th><th>N</th><th>Acierto</th><th>Resultado</th><th>p-valor</th></tr></thead>
+      <tbody id="strats"></tbody>
+    </table>
+    <p class="hint">Una estrategia solo tiene ventaja real si su acierto supera el punto de equilibrio con p-valor &lt; 0.05 después de cientos de operaciones. "Al azar" sirve de referencia: si las demás no le ganan, no aportan nada.</p>
+
     <table>
       <thead><tr><th>Hora</th><th>Señal</th><th>Conf.</th><th>Entrada</th><th>Salida</th><th>Res.</th></tr></thead>
       <tbody id="log"></tbody>
@@ -204,7 +211,44 @@ function computeSignal() {
   const score = 0.45 * Math.tanh(tend) + 0.35 * Math.tanh(mom) + 0.20 * rev;
   const conf = Math.abs(score);
   const siempre = $('siempre').checked;
-  return { dir: (siempre || conf >= UMBRAL) ? (Math.sign(score) || 1) : 0, conf };
+  return { dir: (siempre || conf >= UMBRAL) ? (Math.sign(score) || 1) : 0, conf, comps: { score, tend, mom, r } };
+}
+
+// ---------- Comparación de estrategias (en paralelo, sobre los mismos precios) ----------
+const ESTRATEGIAS = {
+  'Combinada (la del panel)': c => Math.sign(c.score) || 1,
+  'Tendencia (EMA)':          c => Math.sign(c.tend) || 1,
+  'Momentum':                 c => Math.sign(c.mom) || 1,
+  'Reversión RSI':            c => c.r > 50 ? -1 : 1,
+  'Contraria (al revés)':     c => -(Math.sign(c.score) || 1),
+  'Al azar (referencia)':     c => Math.random() < 0.5 ? 1 : -1,
+};
+const stratStats = Object.fromEntries(Object.keys(ESTRATEGIAS).map(k => [k, { n: 0, w: 0 }]));
+let shadow = null; // { cierre, entrada, dirs }
+function shadowStep(now, sig) {
+  if (!prices.length) return;
+  const precio = prices[prices.length - 1].p;
+  if (shadow && now >= shadow.cierre) {
+    for (const [k, d] of Object.entries(shadow.dirs)) {
+      stratStats[k].n++; if ((precio - shadow.entrada) * d > 0) stratStats[k].w++;
+    }
+    shadow = null; renderStrats();
+  }
+  if (!shadow && sig.comps) {
+    const dirs = {}; for (const [k, f] of Object.entries(ESTRATEGIAS)) dirs[k] = f(sig.comps);
+    shadow = { cierre: now + DUR * 1000, entrada: precio, dirs };
+  }
+}
+function renderStrats() {
+  const be = 1 / (1 + PAGO);
+  const filas = Object.entries(stratStats).sort((a, b) => (b[1].n ? b[1].w / b[1].n : 0) - (a[1].n ? a[1].w / a[1].n : 0));
+  $('strats').innerHTML = filas.map(([k, s]) => {
+    const t = s.n ? s.w / s.n : null;
+    const p = s.n ? 1 - normCdf((t - be) / Math.sqrt(be * (1 - be) / s.n)) : null;
+    const res = s.w * PAGO - (s.n - s.w);
+    return `<tr><td>${k}</td><td>${s.n}</td><td class="${t !== null && t > be ? 'ok' : 'ko'}">${t === null ? '—' : (t * 100).toFixed(1) + '%'}</td>
+            <td class="${res >= 0 ? 'ok' : 'ko'}">${res >= 0 ? '+' : ''}${res.toFixed(1)}</td><td>${p === null ? '—' : p.toFixed(3)}</td></tr>`;
+  }).join('');
 }
 
 // ---------- Sonido ----------
@@ -344,6 +388,7 @@ async function loop() {
       beep(sig.dir > 0 ? 880 : 440); setTimeout(() => beep(sig.dir > 0 ? 880 : 440), 180);
       notify(sig.dir, sig.conf);
     }
+    shadowStep(now, sig);
     render(now, sig);
   } catch (e) { console.error(e); }
   setTimeout(loop, Math.max(0, 250 - (performance.now() - t0)));
@@ -361,7 +406,7 @@ $('btnStart').onclick = async () => {
   }
   $('status').textContent = 'En marcha.';
   $('btnStop').disabled = false;
-  running = true; updateStats(); loop();
+  running = true; updateStats(); renderStrats(); loop();
 };
 function stopRun() {
   running = false;
