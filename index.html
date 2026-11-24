@@ -52,7 +52,7 @@
     <canvas id="preview" width="900" height="400"></canvas>
     <div class="row">
       <label>Umbral de confianza <input type="range" id="umbral" min="0.3" max="0.9" step="0.05" value="0.6"> <span id="umbralVal">0.60</span></label>
-      <label>Duración (s) <input type="number" id="dur" value="5" min="1" max="60"></label>
+      <label>Duración (s) <input type="number" id="dur" value="60" min="1" max="600"></label>
       <label>Pago (%) <input type="number" id="pago" value="85" min="1" max="100"></label>
     </div>
     <div class="row">
@@ -89,7 +89,7 @@
 const $ = id => document.getElementById(id);
 let video = null, region = null, running = false, worker = null, actx = null;
 let prices = [], openOps = [], results = [], rows = [], lastSignal = 0;
-let DUR = 5, PAGO = 0.85, UMBRAL = 0.6;
+let DUR = 60, PAGO = 0.85, UMBRAL = 0.6;
 
 $('umbral').oninput = e => { $('umbralVal').textContent = (+e.target.value).toFixed(2); UMBRAL = +e.target.value; };
 
@@ -174,6 +174,8 @@ async function readPrice() {
 }
 
 // ---------- Indicadores ----------
+// Ventana de análisis proporcional a la duración (~4 lecturas/s): 5 s -> 60, 60 s -> 480, máx 1200
+function winSize() { return Math.min(1200, Math.max(60, DUR * 8)); }
 function ema(x, n) { const a = 2 / (n + 1); let e = x[0]; for (let i = 1; i < x.length; i++) e = a * x[i] + (1 - a) * e; return e; }
 function std(a) { const m = a.reduce((s, v) => s + v, 0) / a.length; return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length); }
 function rsi(x, n = 14) {
@@ -182,13 +184,15 @@ function rsi(x, n = 14) {
   return up + dn === 0 ? 50 : 100 * up / (up + dn);
 }
 function computeSignal() {
-  if (prices.length < 60) return { dir: 0, conf: 0, warm: true };
-  const x = prices.slice(-60).map(o => o.p);
+  const W = winSize();
+  if (prices.length < W) return { dir: 0, conf: 0, warm: true };
+  const x = prices.slice(-W).map(o => o.p);
+  const L = Math.max(8, Math.round(W / 8));
   const diffs = x.slice(1).map((v, i) => v - x[i]);
   const vol = std(diffs) || 1e-9;
-  const tend = (ema(x, 8) - ema(x, 30)) / (vol * 5);        // tendencia
-  const mom = (x[x.length - 1] - x[x.length - 9]) / (vol * 3); // impulso reciente
-  const r = rsi(x);
+  const tend = (ema(x, Math.round(W / 8)) - ema(x, Math.round(W / 2))) / (vol * 5);        // tendencia
+  const mom = (x[x.length - 1] - x[x.length - 1 - L]) / (vol * 3); // impulso reciente
+  const r = rsi(x, Math.max(14, Math.round(W / 4)));
   const rev = (r > 70 || r < 30) ? -(r - 50) / 50 : 0;        // reversión por RSI extremo
   const score = 0.45 * Math.tanh(tend) + 0.35 * Math.tanh(mom) + 0.20 * rev;
   const conf = Math.abs(score);
@@ -280,7 +284,7 @@ function render(now, sig) {
     box.textContent = (op.dir > 0 ? 'ARRIBA ↑' : 'ABAJO ↓') + '  ' + Math.ceil((op.cierre - now) / 1000) + 's';
   } else {
     box.className = ''; box.textContent = '—';
-    if (sig.warm) $('sub').textContent = `Calentando: ${prices.length}/60 lecturas…`;
+    if (sig.warm) $('sub').textContent = `Calentando: ${prices.length}/${winSize()} lecturas…`;
   }
 }
 async function loop() {
@@ -291,7 +295,7 @@ async function loop() {
     if (p !== null) {
       const last = prices.length ? prices[prices.length - 1].p : null;
       if (last === null || Math.abs(p - last) / last < 0.002) { // descarta errores de OCR
-        prices.push({ t: now, p }); if (prices.length > 400) prices.shift();
+        prices.push({ t: now, p }); if (prices.length > 1500) prices.shift();
         $('price').textContent = 'Precio: ' + p.toFixed(4);
       }
     }
