@@ -26,6 +26,8 @@
   #signal.up { background:var(--up); color:#06210f; }
   #signal.down { background:var(--down); color:#2a0610; }
   #sub { text-align:center; color:var(--mut); margin:10px 0 4px; min-height:20px; }
+  .bar { height:8px; background:#2a313c; border-radius:4px; overflow:hidden; margin:0 auto 6px; max-width:260px; }
+  .bar i { display:block; height:100%; background:var(--acc); }
   #price { text-align:center; font-variant-numeric:tabular-nums; }
   .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:14px; }
   .stat { background:#232933; border-radius:8px; padding:10px; }
@@ -88,7 +90,7 @@
 <script>
 const $ = id => document.getElementById(id);
 let video = null, region = null, running = false, worker = null, actx = null;
-let prices = [], openOps = [], results = [], rows = [], lastSignal = 0;
+let rejected = [], prices = [], openOps = [], results = [], rows = [], lastSignal = 0;
 let DUR = 60, PAGO = 0.85, UMBRAL = 0.6;
 
 $('umbral').oninput = e => { $('umbralVal').textContent = (+e.target.value).toFixed(2); UMBRAL = +e.target.value; };
@@ -121,7 +123,8 @@ function drawPreview() {
 let dragStart = null, dragRect = null;
 function toCanvas(e) {
   const c = $('preview'), b = c.getBoundingClientRect();
-  return { x: (e.clientX - b.left) * c.width / b.width, y: (e.clientY - b.top) * c.height / b.height };
+  const x = (e.clientX - b.left) * c.width / b.width, y = (e.clientY - b.top) * c.height / b.height;
+  return { x: Math.max(0, Math.min(c.width, x)), y: Math.max(0, Math.min(c.height, y)) };
 }
 $('preview').onmousedown = e => { if (!video) return; dragStart = toCanvas(e); };
 window.onmousemove = e => {
@@ -133,10 +136,12 @@ window.onmousemove = e => {
 window.onmouseup = () => {
   if (!dragStart) return;
   dragStart = null;
-  if (dragRect && dragRect.w > 10 && dragRect.h > 40) {
+  if (dragRect && dragRect.w >= 40 && dragRect.h >= 80) {
     region = dragRect;
     $('btnStart').disabled = false;
     $('status').textContent = 'Región lista. Pulsa Iniciar.';
+  } else if (dragRect) {
+    $('status').textContent = 'Rectángulo muy pequeño: márcalo sobre toda la columna de precios (de arriba a abajo).';
   }
   dragRect = null;
 };
@@ -175,6 +180,7 @@ async function readPrice() {
 
 // ---------- Indicadores ----------
 // Ventana de análisis proporcional a la duración (~4 lecturas/s): 5 s -> 60, 60 s -> 480, máx 1200
+const WARM = 120; // ~30 s de lecturas antes de la primera señal
 function winSize() { return Math.min(1200, Math.max(60, DUR * 8)); }
 function ema(x, n) { const a = 2 / (n + 1); let e = x[0]; for (let i = 1; i < x.length; i++) e = a * x[i] + (1 - a) * e; return e; }
 function std(a) { const m = a.reduce((s, v) => s + v, 0) / a.length; return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length); }
@@ -184,8 +190,8 @@ function rsi(x, n = 14) {
   return up + dn === 0 ? 50 : 100 * up / (up + dn);
 }
 function computeSignal() {
-  const W = winSize();
-  if (prices.length < W) return { dir: 0, conf: 0, warm: true };
+  if (prices.length < WARM) return { dir: 0, conf: 0, warm: true };
+  const W = Math.min(winSize(), prices.length);
   const x = prices.slice(-W).map(o => o.p);
   const L = Math.max(8, Math.round(W / 8));
   const diffs = x.slice(1).map((v, i) => v - x[i]);
@@ -207,6 +213,16 @@ function beep(freq) {
   g.gain.setValueAtTime(0.25, actx.currentTime);
   g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.35);
   o.start(); o.stop(actx.currentTime + 0.35);
+}
+
+// ---------- Avisos (aunque la pestaña esté en segundo plano) ----------
+let flashTimer = null;
+function notify(dir, conf) {
+  const msg = `¡HUNDE ${dir > 0 ? 'ARRIBA ↑' : 'ABAJO ↓'} AHORA!`;
+  try { if ('Notification' in window && Notification.permission === 'granted')
+    new Notification(msg, { body: `Confianza ${conf.toFixed(2)} · ${DUR}s`, requireInteraction: false, tag: 'senal' }); } catch (e) {}
+  clearInterval(flashTimer); let on = false, n = 0;
+  flashTimer = setInterval(() => { document.title = (on = !on) ? msg : 'Panel de señales'; if (++n > 10) { clearInterval(flashTimer); document.title = 'Panel de señales · cuenta demo'; } }, 500);
 }
 
 // ---------- Estadística ----------
@@ -281,10 +297,18 @@ function render(now, sig) {
   const op = openOps[openOps.length - 1];
   if (op) {
     box.className = op.dir > 0 ? 'up' : 'down';
-    box.textContent = (op.dir > 0 ? 'ARRIBA ↑' : 'ABAJO ↓') + '  ' + Math.ceil((op.cierre - now) / 1000) + 's';
+    box.textContent = (op.dir > 0 ? '↑ ARRIBA' : '↓ ABAJO') + '  ' + Math.ceil((op.cierre - now) / 1000) + 's';
+    $('sub').textContent = `¡HUNDE ${op.dir > 0 ? 'ARRIBA' : 'ABAJO'} AHORA! · confianza ${op.conf.toFixed(2)}`;
   } else {
-    box.className = ''; box.textContent = '—';
-    if (sig.warm) $('sub').textContent = `Calentando: ${prices.length}/${winSize()} lecturas…`;
+    box.className = '';
+    if (sig.warm) {
+      const pct = Math.round(prices.length / WARM * 100);
+      box.textContent = 'Calentando';
+      $('sub').innerHTML = `<div class="bar"><i style="width:${pct}%"></i></div>${prices.length}/${WARM} lecturas`;
+    } else {
+      box.textContent = 'ESPERA';
+      $('sub').textContent = `No hundas nada · confianza ${sig.conf.toFixed(2)} / umbral ${UMBRAL.toFixed(2)}`;
+    }
   }
 }
 async function loop() {
@@ -295,8 +319,17 @@ async function loop() {
     if (p !== null) {
       const last = prices.length ? prices[prices.length - 1].p : null;
       if (last === null || Math.abs(p - last) / last < 0.002) { // descarta errores de OCR
+        rejected = [];
         prices.push({ t: now, p }); if (prices.length > 1500) prices.shift();
         $('price').textContent = 'Precio: ' + p.toFixed(4);
+      } else {
+        // Si varias lecturas seguidas coinciden entre sí, la lectura vieja era la errónea: reiniciar
+        rejected.push(p);
+        if (rejected.length >= 3) {
+          const ok = rejected.every(v => Math.abs(v - rejected[0]) / rejected[0] < 0.002);
+          if (ok) { prices = rejected.map(v => ({ t: now, p: v })); $('price').textContent = 'Precio: ' + p.toFixed(4); }
+          rejected = [];
+        }
       }
     }
     closeExpired(now);
@@ -306,7 +339,8 @@ async function loop() {
       openOps.push({ dir: sig.dir, conf: sig.conf, entrada, cierre: now + DUR * 1000,
                      hora: new Date(now).toLocaleTimeString('es-CO') });
       lastSignal = now;
-      beep(sig.dir > 0 ? 880 : 440);
+      beep(sig.dir > 0 ? 880 : 440); setTimeout(() => beep(sig.dir > 0 ? 880 : 440), 180);
+      notify(sig.dir, sig.conf);
     }
     render(now, sig);
   } catch (e) { console.error(e); }
@@ -316,6 +350,7 @@ async function loop() {
 $('btnStart').onclick = async () => {
   DUR = +$('dur').value || 5; PAGO = (+$('pago').value || 85) / 100; UMBRAL = +$('umbral').value;
   actx = actx || new AudioContext();
+  try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (e) {}
   $('btnStart').disabled = true; $('btnShare').disabled = true;
   $('status').textContent = 'Cargando OCR…';
   if (!worker) {
